@@ -118,7 +118,7 @@ public:
 
   void processUpdates();
 
-  QWidget* qtWidget() override;
+  QMainWindow* mainWindow() override;
 
   bool addProfile();
   void updateBSAList(const QStringList &defaultArchives, const QStringList &activeArchives);
@@ -176,6 +176,11 @@ signals:
    * @brief emitted when the selected style changes
    */
   void styleChanged(const QString &styleFile);
+
+  /**
+   * @brief emitted when the user interface has been completely initialized
+   */
+  void userInterfaceInitialized();
 
 
   void modListDataChanged(const QModelIndex &topLeft, const QModelIndex &bottomRight);
@@ -248,7 +253,7 @@ private:
   void fixCategories();
 
   bool extractProgress(QProgressDialog &extractProgress, int percentage, std::string fileName);
-   
+
   // Performs checks, sets the m_NumberOfProblems and signals checkForProblemsDone().
   void checkForProblemsImpl();
 
@@ -495,6 +500,7 @@ private slots:
     ModListSortProxy::FilterMode mode, ModListSortProxy::SeparatorsMode sep);
 
   void displayModInformation(const QString &modName, ModInfoTabIDs tabID);
+  void visitNexusOrWebPage(const QModelIndex& idx);
 
   void modRenamed(const QString &oldName, const QString &newName);
   void modRemoved(const QString &fileName);

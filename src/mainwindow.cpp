@@ -504,6 +504,7 @@ MainWindow::MainWindow(Settings &settings
   m_Tutorial.expose("espList", m_OrganizerCore.pluginList());
 
   m_OrganizerCore.setUserInterface(this);
+  connect(this, &MainWindow::userInterfaceInitialized, &m_OrganizerCore, &OrganizerCore::userInterfaceInitialized);
   for (const QString &fileName : m_PluginContainer.pluginFileNames()) {
     installTranslator(QFileInfo(fileName).baseName());
   }
@@ -718,7 +719,8 @@ MainWindow::~MainWindow()
 
 void MainWindow::updateWindowTitle(const APIUserAccount& user)
 {
-  QString title = QString("%1 Mod Organizer v%2").arg(
+  //"\xe2\x80\x93" is an "em dash", a longer "-"
+  QString title = QString("%1 \xe2\x80\x93 Mod Organizer v%2").arg(
         m_OrganizerCore.managedGame()->gameName(),
         m_OrganizerCore.getVersion().displayString(3));
 
@@ -1384,6 +1386,9 @@ void MainWindow::showEvent(QShowEvent *event)
     m_OrganizerCore.settings().nexus().registerAsNXMHandler(false);
     m_WasVisible = true;
     updateProblemsButton();
+
+    // Notify plugin that the UI is initialized:
+    emit userInterfaceInitialized();
   }
 }
 
@@ -2143,7 +2148,7 @@ void MainWindow::activateProxy(bool activate)
   busyDialog.setWindowFlags(busyDialog.windowFlags() & ~Qt::WindowContextHelpButtonHint);
   busyDialog.setWindowModality(Qt::WindowModal);
   busyDialog.show();
-  
+
   QFutureWatcher<void> futureWatcher;
   QEventLoop loop;
   connect(&futureWatcher, &QFutureWatcher<void>::finished,
@@ -2153,7 +2158,7 @@ void MainWindow::activateProxy(bool activate)
   futureWatcher.setFuture(
     QtConcurrent::run(MainWindow::setupNetworkProxy, activate)
   );
-  
+
   // wait for setupNetworkProxy while keeping ui responsive
   loop.exec();
 
@@ -2223,6 +2228,11 @@ void MainWindow::processUpdates() {
         ui->downloadView->header()->hideSection(i);
       }
     }
+
+    if (lastVersion < QVersionNumber(2, 3)) {
+      for (int i=1; i<ui->dataTree->header()->count(); ++i)
+        ui->dataTree->setColumnWidth(i, 150);
+    }
   }
 
   if (currentVersion < lastVersion) {
@@ -2266,7 +2276,7 @@ void MainWindow::storeSettings()
   s.interface().setFilterOptions(FilterWidget::options());
 }
 
-QWidget* MainWindow::qtWidget()
+QMainWindow* MainWindow::mainWindow()
 {
   return this;
 }
@@ -3301,6 +3311,29 @@ void MainWindow::visitWebPage_clicked()
   }
 }
 
+void MainWindow::visitNexusOrWebPage(const QModelIndex& idx)
+{
+  int row_idx = idx.data(Qt::UserRole + 1).toInt();
+
+  ModInfo::Ptr info = ModInfo::getByIndex(row_idx);
+  if (!info) {
+    log::error("mod {} not found", row_idx);
+    return;
+  }
+
+  int modID = info->getNexusID();
+  QString gameName = info->getGameName();
+  const auto url = info->parseCustomURL();
+
+  if (modID > 0) {
+    linkClicked(NexusInterface::instance(&m_PluginContainer)->getModURL(modID, gameName));
+  } else if (url.isValid()) {
+    linkClicked(url.toString());
+  } else {
+    log::error("mod '{}' has no valid link", info->name());
+  }
+}
+
 void MainWindow::visitNexusOrWebPage_clicked() {
   QItemSelectionModel* selection = ui->modList->selectionModel();
   if (selection->hasSelection() && selection->selectedRows().count() > 1) {
@@ -3312,43 +3345,14 @@ void MainWindow::visitNexusOrWebPage_clicked() {
         return;
       }
     }
-    int row_idx;
-    ModInfo::Ptr info;
-    QString gameName;
 
     for (QModelIndex idx : selection->selectedRows()) {
-      row_idx = idx.data(Qt::UserRole + 1).toInt();
-      info = ModInfo::getByIndex(row_idx);
-      int modID = info->getNexusID();
-      gameName = info->getGameName();
-      const auto url = info->parseCustomURL();
-      if (modID > 0) {
-        linkClicked(NexusInterface::instance(&m_PluginContainer)->getModURL(modID, gameName));
-      }
-      else if (url.isValid()) {
-        linkClicked(url.toString());
-      }
-      else {
-        log::error("mod '{}' has no valid link", info->name());
-      }
+      visitNexusOrWebPage(idx);
     }
   }
   else {
-    int modID = m_OrganizerCore.modList()->data(m_OrganizerCore.modList()->index(m_ContextRow, 0), Qt::UserRole).toInt();
-    QString gameName = m_OrganizerCore.modList()->data(m_OrganizerCore.modList()->index(m_ContextRow, 0), Qt::UserRole + 4).toString();
-    if (modID > 0) {
-      linkClicked(NexusInterface::instance(&m_PluginContainer)->getModURL(modID, gameName));
-    }
-    else {
-      ModInfo::Ptr info = ModInfo::getByIndex(m_ContextRow);
-      const auto url = info->parseCustomURL();
-      if (url.isValid()) {
-        linkClicked(url.toString());
-      }
-      else {
-        MessageDialog::showMessage(tr("No valid Web Page for this mod"), this);
-      }
-    }
+    QModelIndex idx = m_OrganizerCore.modList()->index(m_ContextRow, 0);
+    visitNexusOrWebPage(idx);
   }
 }
 
@@ -3857,7 +3861,10 @@ void MainWindow::on_modList_doubleClicked(const QModelIndex &index)
   if (modifiers.testFlag(Qt::ControlModifier)) {
     try {
       m_ContextRow = m_ModListSortProxy->mapToSource(index).row();
-      openExplorer_clicked();
+
+      ModInfo::Ptr modInfo = ModInfo::getByIndex(m_ContextRow);
+      shell::Explore(modInfo->absolutePath());
+
       // workaround to cancel the editor that might have opened because of
       // selection-click
       ui->modList->closePersistentEditor(index);
@@ -3869,7 +3876,8 @@ void MainWindow::on_modList_doubleClicked(const QModelIndex &index)
   else if (modifiers.testFlag(Qt::ShiftModifier)) {
     try {
       m_ContextRow = m_ModListSortProxy->mapToSource(index).row();
-      visitNexusOrWebPage_clicked();
+      QModelIndex idx = m_OrganizerCore.modList()->index(m_ContextRow, 0);
+      visitNexusOrWebPage(idx);
       ui->modList->closePersistentEditor(index);
     }
     catch (const std::exception & e) {
@@ -5799,7 +5807,7 @@ void MainWindow::nxmRequestFailed(QString gameName, int modID, int, QVariant, in
 {
   if (error == QNetworkReply::ContentAccessDenied || error == QNetworkReply::ContentNotFoundError) {
     log::debug("{}", tr("Mod ID %1 no longer seems to be available on Nexus.").arg(modID));
-    
+
     // update last checked timestamp on orphaned mods as well to avoid repeating requests
     QString gameNameReal;
     for (IPluginGame* game : m_PluginContainer.plugins<IPluginGame>()) {
@@ -6220,6 +6228,16 @@ void MainWindow::on_showHiddenBox_toggled(bool checked)
 
 void MainWindow::on_bossButton_clicked()
 {
+  const auto r = QMessageBox::question(
+    this, tr("Sorting plugins"),
+    tr("Are you sure you want to sort your plugins list?"),
+    QMessageBox::Yes | QMessageBox::No);
+
+  if (r != QMessageBox::Yes) {
+    return;
+  }
+
+
   m_OrganizerCore.savePluginList();
 
   setEnabled(false);
